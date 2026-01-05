@@ -1,0 +1,121 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <title>Database Seeder</title>
+</head>
+
+<body>
+    <h1>Seeding Database...</h1>
+    <div id="status">Starting...</div>
+    <ul id="logs"></ul>
+
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-app.js";
+        import { getFirestore, collection, doc, setDoc } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore.js";
+
+        // Config from sdk.js
+        const firebaseConfig = {
+            apiKey: "AIzaSyCBh6cajym6eVGZmRsBab9Whef45GnvSGc",
+            authDomain: "smartattendancesystem-27bb0.firebaseapp.com",
+            projectId: "smartattendancesystem-27bb0",
+            storageBucket: "smartattendancesystem-27bb0.firebasestorage.app",
+            messagingSenderId: "847608779862",
+            appId: "1:847608779862:web:a5c1d68aad533cc8a817f7",
+            measurementId: "G-5SJRX2P6CP"
+        };
+
+        const app = initializeApp(firebaseConfig);
+        const db = getFirestore(app);
+
+        // Raw Data from User
+        const rawStudents = [
+            { name: "U.Bheemesh", reg: "23G31A3183", branch: "CAI", year: "III", mobile: "6302750463" },
+            { name: "B.Mahendra", reg: "23G31A0509", branch: "CSE", year: "III", mobile: "9000000002" },
+            { name: "K.Sathees", reg: "23G31A0454", branch: "ECE", year: "III", mobile: "9391405338" },
+            { name: "B.Vinay", reg: "23G31A3116", branch: "CAI", year: "III", mobile: "9000000004" },
+            { name: "K.Thiru", reg: "23G31A0536", branch: "CSE", year: "III", mobile: "9000000005" },
+            { name: "M.Kiran", reg: "23G31A0477", branch: "ECE", year: "III", mobile: "6304703592" },
+            { name: "K.Gopi", reg: "23G31A0406", branch: "ECE", year: "(Lateral) III", mobile: "9000000007" },
+            { name: "K.Suresh", reg: "23G31A3193", branch: "CAI", year: "III", mobile: "9000000008" },
+            { name: "B.Vamsi", reg: "23G31A3224", branch: "CSD", year: "III", mobile: "9000000009" }
+        ];
+
+        // Teachers (Preserving existing logic but updating if needed, using defaults for now)
+        const teachers = [
+            { email: 'teacher1@example.com', role: 'teacher', name: 'Dr. Priya Patel', registration_no: 'TCH2020045' },
+            { email: 'teacher2@example.com', role: 'teacher', name: 'Prof. Amit Verma', registration_no: 'TCH2021022' }
+        ];
+
+        const logs = document.getElementById('logs');
+        function log(msg) {
+            const li = document.createElement('li');
+            li.textContent = msg;
+            logs.appendChild(li);
+        }
+
+        async function seed() {
+            try {
+                // Clear existing (conceptually - simplistic overwrites here)
+                log("🚀 Starting Seeding...");
+
+                // Seed Students
+                for (const s of rawStudents) {
+                    // Extract or Normalize Data
+                    // User provided explicit Branch/Year/Mobile, so we use those.
+                    // We also want to support parsing logic for FUTURE registrations.
+
+                    const userData = {
+                        name: s.name,
+                        registration_no: s.reg,
+                        branch: s.branch,
+                        year: s.year, // "III" or "(Lateral) III"
+                        mobile_number: s.mobile,
+                        email: `${s.reg.toLowerCase()}@example.com`, // Auto-generate dummy email
+                        role: 'student',
+                        is_lateral: s.year.includes("Lateral")
+                    };
+
+                    await setDoc(doc(db, "users", s.reg), {
+                        ...userData,
+                        username: s.reg, // Use reg no as username/primary key equivalent
+                        createdAt: new Date().toISOString()
+                    });
+                    log(`✅ Uploaded Student: ${s.name} (${s.reg})`);
+                }
+
+                // Seed Teachers
+                for (const t of teachers) {
+                    await setDoc(doc(db, "users", t.registration_no), {
+                        ...t,
+                        username: t.registration_no,
+                        createdAt: new Date().toISOString()
+                    });
+                    log(`✅ Uploaded Teacher: ${t.name}`);
+                }
+
+                // Seed Admin
+                await setDoc(doc(db, "users", "admin001"), {
+                    email: 'admin@example.com',
+                    role: 'admin',
+                    name: 'Super Admin',
+                    registration_no: 'ADM2019001',
+                    username: 'admin001',
+                    createdAt: new Date().toISOString()
+                });
+                log(`✅ Uploaded Admin`);
+
+                document.getElementById('status').textContent = "Seeding Complete! You can delete this file now.";
+            } catch (error) {
+                console.error(error);
+                log(`❌ Error: ${error.message}`);
+                document.getElementById('status').textContent = "Failed. Check console.";
+            }
+        }
+
+        seed();
+    </script>
+</body>
+
+</html>
