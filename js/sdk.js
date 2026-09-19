@@ -21,9 +21,15 @@ try {
     auth = getAuth(app);
     db = getFirestore(app);
     console.log("Firebase initialized");
-    const analytics = getAnalytics(app);
 } catch (e) {
     console.error("Error initializing Firebase (Did you set the config?):", e);
+}
+
+// Analytics only works in supported (usually https) contexts; it must not break the app.
+try {
+    getAnalytics(app);
+} catch (e) {
+    console.warn("Firebase Analytics unavailable in this context (this is fine locally):", e?.message || e);
 }
 
 // Element SDK (Config) - Kept Local for now, could be moved to Firestore/RemoteConfig

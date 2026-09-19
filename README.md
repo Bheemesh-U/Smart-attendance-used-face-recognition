@@ -22,7 +22,6 @@ An advanced, AI-powered attendance management platform designed for modern educa
 ## 📂 Project Structure
 
 ```
-smart/
 ├── css/
 │   └── style.css          # Custom styles & Tailwind directives
 ├── js/

@@ -37,6 +37,7 @@ let isScanning = false;
 let isRecognitionPaused = false;
 let detectedFacesCount = 0;
 let lastAttendanceMarkedTime = {};
+let clockInterval = null; // only one dashboard clock may run
 
 // Demo User Mapping
 const demoUsers = {
@@ -126,69 +127,16 @@ async function initializeFaceRecognition() {
   }
 }
 
-// Handle face detection (simulated)
-async function handleFaceDetection() {
-  const config = window.elementSdk.config;
-  const fontSize = config.font_size || defaultConfig.font_size;
-
-  // Show what was detected
-  const recognitionDisplay = document.getElementById('recognitionDisplay');
-  const recognizedText = document.getElementById('recognizedText');
-  const recognizedStudent = document.getElementById('recognizedStudent');
-
-  if (recognizedText) {
-    recognizedText.textContent = `Face detected... Analyzing facial features...`;
-  }
-
-  // Simulate face recognition processing (in real app, this would use ML model)
-  await new Promise(resolve => setTimeout(resolve, 2000));
-
-  // For demo purposes, recognize from student database
-  // Student database logic
-  const studentDatabase = Object.values(demoUsers).filter(u => u.role === 'student');
-
-  // Randomly select a student for demo
-  const student = studentDatabase[Math.floor(Math.random() * studentDatabase.length)];
-  const confidence = 0.92 + Math.random() * 0.07; // 92-99% confidence
-
-  if (student) {
-    // Show recognition
-    if (recognitionDisplay && recognizedStudent) {
-      recognizedStudent.innerHTML = `
-        <div style="font-size: ${fontSize * 0.875}px; color: ${config.text_color || defaultConfig.text_color}; margin-bottom: 0.5rem;">
-          <strong>Face Recognized:</strong>
-        </div>
-        <div style="font-size: ${fontSize}px; font-weight: 600; color: ${config.primary_color || defaultConfig.primary_color}; margin-bottom: 0.25rem;">
-          ${student.name}
-        </div>
-        <div style="font-size: ${fontSize * 0.875}px; color: ${config.text_color || defaultConfig.text_color}; opacity: 0.7;">
-          ${student.registration_no} • Confidence: ${Math.round(confidence * 100)}%
-        </div>
-      `;
-      recognitionDisplay.style.display = 'block';
-
-      // Hide after 5 seconds
-      setTimeout(() => {
-        recognitionDisplay.style.display = 'none';
-      }, 5000);
-    }
-
-    await markAttendanceAutomatically(student, confidence);
-    showNotification(`✓ Attendance marked for ${student.name}`, 'success');
-  } else {
-    showNotification('Face not recognized. Please try again.', 'warning');
-  }
-}
-
 // Mark attendance automatically
-async function markAttendanceAutomatically(student, confidence) {
+async function markAttendanceAutomatically(student, confidence, confidencePct) {
   const status = checkAttendanceAllowed();
   if (!status.allowed) {
     showNotification(`Attendance Disabled: ${status.reason}`, 'error');
     return;
   }
 
-  const today = new Date().toISOString().split('T')[0];
+  // Local calendar date (toISOString() would be the previous day for evening hours in +IST)
+  const today = new Date().toLocaleDateString('en-CA');
 
   // Check if already marked today
   const existingRecord = allData.find(record =>
@@ -202,14 +150,14 @@ async function markAttendanceAutomatically(student, confidence) {
   }
 
   const attendanceRecord = {
-    id: `ATT_${Date.now()}_${student.registration_no}`,
     type: 'attendance',
     student_id: student.registration_no,
     student_name: student.name,
     date: today,
     present: true,
     auto_marked: true,
-    recognition_confidence: Math.round(confidence * 100),
+    // face-api's distance (lower = better) is not a percentage; store the real (1-d) confidence
+    recognition_confidence: Math.round(confidencePct ?? ((1 - confidence) * 100)),
     created_at: new Date().toISOString()
   };
 
@@ -222,9 +170,12 @@ async function markAttendanceAutomatically(student, confidence) {
 
 // Start camera
 async function startCamera() {
+  if (isCameraActive) return; // prevent double-start from re-renders
+
   const hasCamera = await initializeFaceRecognition();
   if (!hasCamera) {
     showCameraPermissionHelp();
+    return; // do not mark the camera as active when permission failed
   }
 
   isCameraActive = true;
@@ -237,8 +188,11 @@ async function startCamera() {
     await new Promise(resolve => video.onloadedmetadata = resolve);
     video.play();
 
-    // Start AI scanning
-    startAiScanning(video, canvas);
+    // Start AI scanning (model errors are surfaced to the UI instead of failing silently)
+    startAiScanning(video, canvas).catch(err => {
+      console.error('AI scanning failed to start:', err);
+      showNotification('⚠️ ' + err.message, 'error');
+    });
   }
 
   updateCameraUI();
@@ -247,7 +201,11 @@ async function startCamera() {
 
 // AI Scanning Loop
 async function startAiScanning(video, canvas) {
+  if (isScanning) return; // already running
   isScanning = true;
+
+  // Preload models up-front so failures surface here, before the loop starts
+  await faceRecognition.loadModels();
 
   // Ensure we have student data for recognition
   const students = Object.values(demoUsers).filter(u => u.role === 'student');
@@ -257,18 +215,23 @@ async function startAiScanning(video, canvas) {
     if (!isScanning || !isCameraActive) return;
 
     if (isRecognitionPaused) {
-      const canvas = document.getElementById('faceOverlay');
-      if (canvas) canvas.getContext('2d').clearRect(0, 0, canvas.width, canvas.height);
+      // elements can be re-created on re-render; look them up each frame
+      const overlay = document.getElementById('faceOverlay');
+      if (overlay) overlay.getContext('2d').clearRect(0, 0, overlay.width, overlay.height);
       requestAnimationFrame(scan);
       return;
     }
 
     try {
-      detectedFacesCount = await faceRecognition.detectAndIdentify(video, canvas, students);
+      // elements can be re-created on re-render; use the fresh ones each frame
+      const liveVideo = document.getElementById('faceVideo');
+      const liveCanvas = document.getElementById('faceOverlay');
+      if (liveVideo && liveCanvas) {
+        detectedFacesCount = await faceRecognition.detectAndIdentify(liveVideo, liveCanvas, students);
 
-      const countEl = document.getElementById('faceCount');
-      if (countEl) countEl.textContent = detectedFacesCount;
-
+        const countEl = document.getElementById('faceCount');
+        if (countEl) countEl.textContent = detectedFacesCount;
+      }
     } catch (err) {
       console.error('Scanning error:', err);
     }
@@ -281,19 +244,18 @@ async function startAiScanning(video, canvas) {
 
 // Listener for recognized faces from face-recognition.js
 window.addEventListener('faceRecognized', async (e) => {
-  const { student, confidence } = e.detail;
+  const { student, confidence, confidencePct } = e.detail;
   const now = Date.now();
 
-  // Throttle attendance marking (wait 1 minute before re-marking same student)
-  if (lastAttendanceMarkedTime[student.registration_no] && (now - lastAttendanceMarkedTime[student.registration_no] < 60000)) {
+  // Mark each student at most once per session
+  if (lastAttendanceMarkedTime[student.registration_no]) {
     return;
   }
-
   lastAttendanceMarkedTime[student.registration_no] = now;
 
-  // Pause recognition for 3 seconds to show "Success" state clearly and stop continuous scanning
+  // Pause recognition briefly to show the "Success" state clearly
   isRecognitionPaused = true;
-  await markAttendanceAutomatically(student, confidence);
+  await markAttendanceAutomatically(student, confidence, confidencePct);
   showNotification(`✓ ${student.name} marked present`, 'success');
 
   setTimeout(() => {
@@ -523,8 +485,8 @@ function renderLogin() {
                 <option value="teacher">Teacher</option>
                 <option value="admin">Admin</option>
               </select>
-              <div class="absolute right-4 top-1/2 transform -translate-y-1/2 pointer-events-none text-gray-500">▼</div>
-            </div>
+              <div class="absolute right-4 top-1/2 transform -translate-y-1/2 pointer-events-none text-gray-500">▼      </div>
+    </div>
           </div>
 
           <button type="submit" id="loginBtn"
@@ -571,9 +533,9 @@ window.renderRegistration = function () {
                </div>
                <div>
                   <label class="block text-xs font-bold text-slate-500 mb-1 uppercase">Registration Number</label>
-                  <input type="text" id="regNo" required placeholder="e.g. 23G31A13B3" class="input-modern w-full px-4 py-2 rounded-xl" onchange="parseRegDetails(this.value)">
-               </div>
-            </div>
+                  <input type="text" id="regNo" required placeholder="e.g. 23G31A05B2" class="input-modern w-full px-4 py-2 rounded-xl" onchange="parseRegDetails(this.value)">
+                     </div>
+    </div>
 
             <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
                <div>
@@ -583,8 +545,8 @@ window.renderRegistration = function () {
                <div>
                  <label class="block text-xs font-bold text-slate-500 mb-1 uppercase">Year</label>
                  <input type="text" id="regYear" readonly class="input-modern w-full px-4 py-2 rounded-xl bg-slate-100 text-slate-600 cursor-not-allowed">
-              </div>
-            </div>
+                    </div>
+    </div>
 
             <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
                <div>
@@ -598,8 +560,8 @@ window.renderRegistration = function () {
                <div>
                  <label class="block text-xs font-bold text-slate-500 mb-1 uppercase">Mobile Number</label>
                  <input type="tel" id="regMobile" required placeholder="e.g. 9848XXXXXX" class="input-modern w-full px-4 py-2 rounded-xl">
-              </div>
-            </div>
+                    </div>
+    </div>
 
             <div>
                <label class="block text-xs font-bold text-slate-500 mb-1 uppercase">Email</label>
@@ -823,7 +785,7 @@ function renderStudentDashboard() {
 
     <!-- Main Content Area -->
     <main class="flex-1 h-full overflow-y-auto relative">
-      <div class="p-6 md:p-10 max-w-7xl mx-auto">
+      <div class="p-6 md:p-10 max-w-7xlmx-auto">
         <header class="flex flex-col md:flex-row justify-between items-start md:items-center mb-10 fade-in-up">
           <div>
             <h1 class="text-3xl lg:text-4xl font-extrabold text-slate-900 tracking-tight mb-1">
@@ -846,8 +808,8 @@ function renderStudentDashboard() {
             </div>
             <div class="pr-3 hidden sm:block">
               <div class="text-xs font-bold text-slate-800 leading-tight">${currentUser.name}</div>
-              <div class="text-[10px] text-slate-500 font-medium uppercase tracking-wider">${currentUser.registration_no}</div>
-            </div>
+              <div class="text-[10px] text-slate-500 font-medium uppercase tracking-wider">${currentUser.registration_no}      </div>
+    </div>
           </div>
         </header>
 
@@ -859,6 +821,26 @@ function renderStudentDashboard() {
   `;
 
   startClock();
+
+  // Face ID status comes from the cloud DB (an inline <script> injected via
+  // innerHTML would never execute)
+  checkFaceIdStatus(currentUser.registration_no);
+}
+
+// Async status check for the dashboard "Face ID Status" card
+async function checkFaceIdStatus(registrationNo) {
+  try {
+    const descriptors = await window.dataSdk.getAllFaceDescriptors();
+    const isRegistered = descriptors.some(d => d.student_id === registrationNo);
+    const badge = document.getElementById('faceStatusBadge');
+    if (badge) {
+      badge.innerHTML = isRegistered
+        ? '<span class="flex items-center gap-2 text-emerald-600 font-bold text-sm"><span>✅</span> REGISTERED</span>'
+        : '<span class="flex items-center gap-2 text-rose-500 font-bold text-sm"><span>❌</span> NOT REGISTERED</span>';
+    }
+  } catch (err) {
+    console.warn('Could not check Face ID status:', err);
+  }
 }
 
 // Start Clock and Date Update
@@ -887,10 +869,8 @@ function startClock() {
   }
 
   update(); // Initial call
-  // clear previous interval if any (optional, but good practice if we tracked it)
-  // For this simple app, we'll just set it. 
-  // If we wanted to be strict, we'd store the interval ID.
-  setInterval(update, 1000);
+  if (clockInterval) clearInterval(clockInterval); // avoid stacked intervals across re-renders
+  clockInterval = setInterval(update, 1000);
 }
 
 function getViewTitle(view) {
@@ -955,19 +935,6 @@ function renderStudentHome() {
            <div class="spinner-sm"></div>
            <span class="text-xs text-slate-400">Checking...</span>
         </div>
-        <script>
-           // Small hack to check status after render
-           setTimeout(async () => {
-              const descriptors = await window.dataSdk.getAllFaceDescriptors();
-              const isRegistered = descriptors.some(d => d.student_id === '${currentUser.registration_no}');
-              const badge = document.getElementById('faceStatusBadge');
-              if (badge) {
-                badge.innerHTML = isRegistered 
-                  ? '<span class="flex items-center gap-2 text-emerald-600 font-bold text-sm"><span>✅</span> REGISTERED</span>'
-                  : '<span class="flex items-center gap-2 text-rose-500 font-bold text-sm"><span>❌</span> NOT REGISTERED</span>';
-              }
-           }, 100);
-        </script>
       </div>
 
       <!-- Course Info -->
@@ -1003,7 +970,7 @@ function renderStudentHome() {
     <div class="glass-card rounded-3xl p-8">
       <h3 class="font-bold text-xl text-slate-800 mb-6">Recent Activity</h3>
       <div class="space-y-3">
-        ${myAttendance.slice(-3).reverse().map((record, i) => `
+        ${myAttendance.slice(0, 3).map((record, i) => `
           <div class="flex items-center justify-between p-4 bg-white/50 border border-white rounded-2xl hover:shadow-md transition-shadow">
             <div class="flex items-center gap-4">
               <div class="w-12 h-12 rounded-2xl flex items-center justify-center text-xl bg-indigo-100 text-indigo-600">
@@ -1012,8 +979,8 @@ function renderStudentHome() {
               <div>
                  <p class="font-bold text-slate-800">Attendance Log</p>
                  <p class="text-sm text-slate-500">${record.date} • ${record.auto_marked ? 'AI Face Scan' : 'Manual'}</p>
-              </div>
-            </div>
+                    </div>
+    </div>
             <span class="text-emerald-600 font-bold">Present</span>
           </div>
         `).join('') || '<p class="text-slate-400">No recent activity.</p>'}
@@ -1023,8 +990,7 @@ function renderStudentHome() {
 }
 
 function renderAIAdvisor() {
-  return `
-    <div class="grid grid-cols-1 lg:grid-cols-2 gap-8">
+  return `<div class="grid grid-cols-1 lg:grid-cols-2 gap-8">
       <div class="glass-card p-8 rounded-3xl">
         <div class="flex items-center gap-4 mb-6">
           <div class="w-12 h-12 bg-indigo-500 text-white rounded-2xl flex items-center justify-center text-2xl">💡</div>
@@ -1495,8 +1461,8 @@ function renderSemesterSubjects() {
             </div>
           </div>`;
   }).join('')}
-      </div >
-    </div >
+      </div>
+    </div>
   `;
 }
 
@@ -1509,7 +1475,7 @@ function renderSkillsTracker() {
   ];
 
   return `
-  < div class="grid grid-cols-1 lg:grid-cols-2 gap-8" >
+  <div class="grid grid-cols-1 lg:grid-cols-2 gap-8">
       <div class="glass-card p-8 rounded-3xl">
         <h3 class="font-bold text-2xl mb-8">Skill Proficiency</h3>
         <div class="space-y-8">
@@ -1547,13 +1513,13 @@ function renderSkillsTracker() {
           </div>
         </div>
       </div>
-    </div >
+    </div>
   `;
 }
 
 function renderFinancialLiteracy() {
   return `
-  < div class="grid grid-cols-1 lg:grid-cols-2 gap-8" >
+  <div class="grid grid-cols-1 lg:grid-cols-2 gap-8">
       <div class="glass-card p-8 rounded-3xl">
         <h3 class="font-bold text-2xl mb-6 flex items-center gap-3">💰 Monthly Spending</h3>
         <div class="flex items-center justify-between mb-8">
@@ -1600,7 +1566,7 @@ function renderFinancialLiteracy() {
           </div>
         </div>
       </div>
-    </div >
+    </div>
   `;
 }
 
@@ -1890,7 +1856,7 @@ window.sendAbsentSMS = async function (regNo) {
     // This allows you to send the SMS immediately without paying for an API right now.
     const encodedMsg = encodeURIComponent(message);
     const mobile = student.mobile_number;
-    window.open(`sms:${mobile}?body = ${encodedMsg} `, '_blank');
+    window.open(`sms:${mobile}?body=${encodedMsg}`, '_blank');
 
     showNotification(`📱 Opening messaging app for ${student.name}...`, 'info');
 
@@ -2271,8 +2237,9 @@ window.deleteUser = function (regNo) {
   }
 };
 
-// Initial App Render
-if (!currentUser) {
+// Initial render happens inside elementSdk.init() below (its onConfigChange fires
+// immediately). If the SDK is ever unavailable, fall back to a direct render.
+if (typeof window.elementSdk === 'undefined') {
   renderLogin();
 }
 
@@ -2305,7 +2272,7 @@ function renderFaceRegistration() {
   const fontSize = config.font_size || defaultConfig.font_size;
 
   return `
-    < div class="max-w-4xl mx-auto" >
+    <div class="max-w-4xl mx-auto">
       <div class="glass-card p-8 rounded-3xl mb-8">
         <div class="flex items-center gap-4 mb-6">
           <div class="w-12 h-12 bg-indigo-500 text-white rounded-2xl flex items-center justify-center text-2xl">👤</div>
@@ -2354,7 +2321,7 @@ function renderFaceRegistration() {
           We do not store your actual images. Our AI converts your facial features into a mathematical signature (Face ID) which is used solely for attendance purposes.
         </p>
       </div>
-    </div >
+    </div>
     `;
 }
 
@@ -2455,27 +2422,9 @@ window.performFaceRegistration = async function () {
   }
 };
 
-// Update task to Phase 2
-async function updatePhase2Task() {
-  // This is just a placeholder for logic that might be needed
-  // But since the task object is in my brain/artifacts, I'll update it there.
-}
-
-// Ensure students are loaded into face-recognition when teacher starts scanner
-const originalStartAiScanning = window.startAiScanning;
-window.startAiScanning = async function (video, canvas) {
-  // Force reload latest descriptors from cloud before scanning
-  const students = Object.values(demoUsers).filter(u => u.role === 'student');
-  await faceRecognition.initLabeledDescriptors(students);
-  return originalStartAiScanning(video, canvas);
-};
-
-// Initialize app after all functions are defined
-renderLogin();
-
 // Manual Attendance for Teacher
 window.handleManualAttendance = async function () {
-  const input = document.getElementById('manualRegInput');
+  const input = document.getElementById('manualReg');
   if (!input) return;
 
   const regNo = input.value.trim().toUpperCase();
@@ -2486,7 +2435,7 @@ window.handleManualAttendance = async function () {
 
   // Create a manual record
   const record = {
-    id: `ATT_${Date.now()}_${regNo} `,
+    id: `ATT_${Date.now()}_${regNo}`,
     type: 'attendance',
     student_id: regNo,
     student_name: 'Manual Entry', // In a real app we would fetch name from DB
@@ -2501,7 +2450,7 @@ window.handleManualAttendance = async function () {
     showNotification(`Attendance marked for ${regNo}`, "success");
     input.value = "";
   } else {
-    showNotification(`Error: ${result.error} `, "error");
+    showNotification(`Error: ${result.error}`, "error");
   }
 };
 
